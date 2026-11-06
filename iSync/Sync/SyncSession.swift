@@ -36,6 +36,7 @@ final class SyncSession {
     var messageTimeout: TimeInterval = 300
 
     private var session = SyncSession.requestSession
+    private var knownIDs = Set<Int64>()
     private var reservedPaths = Set<String>()
     private var musicFolders: [String] = []
     private var createdFolders = Set<String>()
@@ -90,6 +91,12 @@ final class SyncSession {
         ])
     }
 
+    /// Why iSync won't sync while the phone has songs from an unfinished sync waiting for their audio.
+    static func awaitingAudioMessage(count: Int) -> String {
+        let songs = count == 1 ? "1 song" : "\(count.formatted()) songs"
+        return "Your iPhone lists \(songs) from an earlier sync whose audio never finished copying. iSync won't add music until that's resolved: the iPhone would ask iSync for those songs and remove each one iSync can't supply. Sync this iPhone once in Finder so it can finish (or remove those songs), then try again."
+    }
+
     /// Human-readable `SyncFailed` reasons (phone-side codes, rustunes docs chapter 09 §6.3).
     static func describeSyncFailure(_ message: ATCMessage) -> String {
         let code = (message.params["ErrorCode"] as? NSNumber)?.intValue ?? -1
@@ -132,7 +139,13 @@ final class SyncSession {
 
     func run(snapshot: PhoneLibrarySnapshot, inserts: [PlannedInsert]) throws -> Outcome {
         precondition(!inserts.isEmpty)
+        // Checked before anything is sent: a session would make the phone request these songs' audio,
+        // and it drops every song a host answers without audio (observed on iOS 27.2).
+        guard snapshot.awaitingAudio.isEmpty else {
+            throw ISyncError(Self.awaitingAudioMessage(count: snapshot.awaitingAudio.count))
+        }
         musicFolders = snapshot.musicFolders
+        knownIDs = snapshot.usedSyncIDs
 
         // 1. Handshake.
         onEvent(.phase("Connecting to the iPhone's sync service…"))
@@ -181,6 +194,7 @@ final class SyncSession {
         // 3. Deliver what the phone asks for.
         var outcome = Outcome()
         var answered = Set<String>()
+        var sawManifest = false
         let byAssetID = Dictionary(uniqueKeysWithValues: inserts.map { ($0.assetID, $0) })
         receiving: while true {
             if isCancelled() { throw ISyncError("Cancelled.") }
@@ -194,8 +208,14 @@ final class SyncSession {
                 try atc.send(ATCMessage(command: "Pong", session: message.session ?? session))
             case "AssetManifest":
                 try handleManifest(message, inserts: byAssetID, answered: &answered, outcome: &outcome)
+                sawManifest = true
                 onEvent(.phase("Waiting for the iPhone to finish importing…"))
             case "SyncFinished":
+                break receiving
+            case "IdleExit":
+                // The phone's sync agent going idle after the transfers; it closes the connection next.
+                guard sawManifest else { throw ISyncError("The iPhone ended the sync before asking for the songs.") }
+                logInfo("The iPhone ended the session (IdleExit)")
                 break receiving
             case "SyncFailed":
                 throw ISyncError(Self.describeSyncFailure(message))
@@ -219,7 +239,9 @@ final class SyncSession {
         let manifest = message.params["AssetManifest"] as? [String: Any] ?? [:]
         let entries = manifest["Media"] as? [[String: Any]] ?? []
         logInfo("Asset manifest with \(entries.count) request(s)")
-        var foreign = [String]()
+        var own = [(insert: PlannedInsert, parts: Int)]()
+        var declinable = [String]()
+        var unexpected = [String]()
         for entry in entries {
             guard (entry["IsDownload"] as? Bool) ?? true else { continue }
             let raw = entry["AssetID"] as? String ?? (entry["AssetID"] as? NSNumber)?.stringValue ?? ""
@@ -227,14 +249,27 @@ final class SyncSession {
             guard !assetID.isEmpty, !answered.contains(assetID) else { continue }
             let parts = ((entry["Variant"] as? [String: Any])?["AssetParts"] as? NSNumber)?.intValue ?? 1
             if let insert = inserts[assetID] {
-                answered.insert(assetID)
-                try deliver(insert, parts: parts, outcome: &outcome)
+                own.append((insert, parts))
+            } else if parts & 1 == 0, let id = Int64(assetID), knownIDs.contains(id) {
+                // Artwork, Genius or lyrics for a song that already exists.
+                declinable.append(assetID)
             } else {
-                foreign.append(assetID)
+                unexpected.append(assetID)
             }
         }
-        // Requests for other songs' artwork or Genius data: decline them as Apple's host does.
-        for assetID in foreign where !answered.contains(assetID) {
+        // The phone removes a song whose audio request is answered without audio, so a request for
+        // audio iSync doesn't have must never be answered. Stop before sending anything (rustunes
+        // docs, chapter 02 §14.2).
+        guard unexpected.isEmpty else {
+            logError("The manifest asks for \(unexpected.count) asset(s) iSync didn't send: \(unexpected.prefix(5).joined(separator: ", "))")
+            throw ISyncError("The iPhone asked for \(unexpected.count == 1 ? "a song" : "\(unexpected.count) songs") iSync didn't send, so iSync stopped without answering to leave them untouched. The songs from this sync may need to be added again.")
+        }
+        for (insert, parts) in own {
+            answered.insert(insert.assetID)
+            try deliver(insert, parts: parts, outcome: &outcome)
+        }
+        // Ancillary requests for other songs: decline them as Apple's host does; the songs are kept.
+        for assetID in declinable {
             answered.insert(assetID)
             try atc.send(Self.fileError(session: session, assetID: assetID, code: 16))
         }

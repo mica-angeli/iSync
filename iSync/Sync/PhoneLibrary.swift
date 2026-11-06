@@ -29,6 +29,10 @@ struct PhoneLibrarySnapshot {
     var musicFolders: [String]
     /// Sync IDs of tracks whose audio file is on the phone.
     var tracksWithFiles: Set<Int64>
+    /// Sync IDs of synced tracks that are in the library but whose audio never arrived (an unfinished
+    /// sync by another host). The phone asks every host for their audio in the next session and drops
+    /// each one the host doesn't deliver, so iSync must not start a session while any exist.
+    var awaitingAudio: Set<Int64> = []
     /// The host library identity from `iTunesPrefs`, when the phone has been synced before.
     var libraryID: String?
 
@@ -109,10 +113,11 @@ enum PhoneLibrary {
         let anchorText = try db.first("SELECT value FROM _MLDatabaseProperties WHERE key = 'MLSyncClientSyncAnchor'") { $0.text(0) } ?? nil
         let anchor = anchorText.flatMap { Int($0) } ?? 0
 
-        // Songs that count as "on the phone": in the library, or stored locally, or synced.
+        // Songs that count as "on the phone": stored locally, or in the library from iCloud. Synced
+        // rows still waiting for their audio don't count; see `awaitingAudio`.
         let itemColumns = try db.columns(of: "item")
-        var conditions = ["i.base_location_id != 0", "s.sync_id != 0"]
-        if itemColumns.contains("in_my_library") { conditions.append("i.in_my_library = 1") }
+        var conditions = ["i.base_location_id != 0"]
+        if itemColumns.contains("in_my_library") { conditions.append("(i.in_my_library = 1 AND IFNULL(s.sync_id, 0) = 0)") }
         let tracks: [PhoneTrack] = try db.all("""
             SELECT e.title, ia.item_artist, al.album, aa.album_artist, e.total_time_ms, s.sync_id
             FROM item i
@@ -174,12 +179,18 @@ enum PhoneLibrary {
             JOIN item_extra e ON e.item_pid = i.item_pid
             WHERE s.sync_id != 0 AND i.base_location_id != 0 AND e.location IS NOT NULL AND e.location != ''
             """) { $0.int64(0) })
+        let awaiting = Set(try db.all("""
+            SELECT s.sync_id FROM item i
+            JOIN item_store s ON s.item_pid = i.item_pid
+            LEFT JOIN item_extra e ON e.item_pid = i.item_pid
+            WHERE s.sync_id != 0 AND (i.base_location_id = 0 OR e.location IS NULL OR e.location = '')
+            """) { $0.int64(0) })
 
         return PhoneLibrarySnapshot(
             databasePID: databasePID, primaryContainerPID: primaryContainerPID, mediaAnchor: anchor,
             tracks: tracks, albumIDs: albumIDs, artistIDs: artistIDs, usedSyncIDs: used,
             largestArtworkID: largestArtwork, musicFolders: Array(Set(folders)).sorted(),
-            tracksWithFiles: withFiles, libraryID: nil)
+            tracksWithFiles: withFiles, awaitingAudio: awaiting, libraryID: nil)
     }
 }
 

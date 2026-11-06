@@ -399,7 +399,11 @@ final class SyncEngine {
     private func sync(device: AppleDevice, tools: FFTools) async throws {
         activity = "Reading the iPhone's music library…"
         var snapshot = try await readLibrary(device)
-        logInfo("Phone library: \(snapshot.tracks.count) songs, Media anchor \(snapshot.mediaAnchor)")
+        logInfo("Phone library: \(snapshot.tracks.count) songs, Media anchor \(snapshot.mediaAnchor), \(snapshot.awaitingAudio.count) awaiting audio")
+        // Songs stay queued; the banner explains what to do (SyncSession refuses as well).
+        guard snapshot.awaitingAudio.isEmpty else {
+            throw ISyncError(SyncSession.awaitingAudioMessage(count: snapshot.awaitingAudio.count))
+        }
 
         // Skip songs the phone already has (and duplicates within what was dropped).
         var index = DuplicateIndex(tracks: snapshot.tracks)

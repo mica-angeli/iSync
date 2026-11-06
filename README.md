@@ -28,6 +28,10 @@ Drag songs or whole folders onto the window. iSync:
 - On the iPhone, music from a computer must be allowed. If **Sync Library** (iCloud Music Library)
   is turned on in *Settings › Apps › Music*, the iPhone may refuse music from a computer; iSync tells
   you when that happens.
+- No unfinished sync from Finder. If an earlier Finder sync stopped before copying all the songs, the
+  iPhone keeps listing those songs without their audio and asks the next computer to supply it. iSync
+  can't, and the iPhone would remove each one it isn't given, so iSync won't sync until Finder has
+  finished. iSync tells you how many songs are waiting.
 
 ## Build and run
 
@@ -84,10 +88,15 @@ third-party app.
 ## Status
 
 Verified against a real iPhone (iOS 27.2): device discovery, lockdown sessions, Apple's AFC client
-(listing, stat, reads, a 28 MB library database copy) and reading a 16,000-song library. Conversion,
-tagging and the complete sync session are covered by automated tests, including a simulated iPhone
-that checks every protocol message, the signed operation file and the uploads. A full sync session
-(the phone actually importing a song) has not yet been run against real hardware.
+(listing, stat, reads, a 28 MB library database copy) and reading a 16,000-song library. A full sync
+over USB (2026-11-06) worked end to end: a tagged FLAC with cover art was converted to ALAC, the
+phone accepted the signed song list, took the audio and cover, and listed the song with its file.
+
+That session also showed that the iPhone deletes songs left over from an unfinished Finder sync when
+another computer can't supply their audio. iSync now refuses to sync in that situation; see
+[docs/DESIGN.md](docs/DESIGN.md#songs-waiting-for-audio-from-another-host). Conversion, tagging and
+the sync session are also covered by automated tests, including a simulated iPhone that checks every
+protocol message, the signed operation file and the uploads.
 
 ## Project layout
 

@@ -21,8 +21,31 @@ A sync session:
 5. The phone replies with an `AssetManifest` naming the audio (and artwork) it wants. Upload each
    cover to `Airlock/Media/Artwork/<id>` and each audio file to `Airlock/Media/<id>.<ext>`, rename
    it to `Airlock/Media/<id>`, and send `FileComplete` with its permanent path
-   (`iTunes_Control/Music/Fnn/XXXX.ext`). The phone moves the file into place.
-6. Wait for `SyncFinished`, then re-read the database to confirm every song landed.
+   (`iTunes_Control/Music/Fnn/XXXX.ext`). The phone moves the file into place. Artwork-only or
+   Genius-only requests for songs that already exist are declined with `FileError` 16. A request for
+   any other song's **audio** is never answered (see below); iSync stops instead.
+6. Wait for `SyncFinished` (the iOS 27.2 phone may send `IdleExit` instead), then re-read the database
+   to confirm every song landed.
+
+### Songs waiting for audio from another host
+
+The phone's library can list synced songs whose audio never arrived, typically because a Finder sync
+was interrupted after the song list was applied. In every later session the phone asks the host for
+all of their audio, whoever the host is. A host that answers such a request without the audio
+(`FileError`) makes the phone **delete that song from its library**, one by one as it processes the
+answers.
+
+This was observed in iSync's first live session (iOS 27.2, 2026-11-06): the phone had 14,141 such
+songs; iSync declined the requests with `FileError` 16, which rustunes documents as safe only for
+artwork or Genius requests, and the phone deleted the first 690 before it ended the session with
+`IdleExit`. No audio files were removed, since those songs had none on the phone. iSync therefore:
+
+- counts these rows when reading the library (`item_store.sync_id != 0` with no `base_location_id` or
+  `location`) and refuses to start a session while any exist, before sending anything to the phone,
+  telling the user to let Finder finish its sync first;
+- never answers a request for audio it didn't send, and stops without answering anything if a manifest
+  contains one (rustunes docs, chapter 02 §14.2);
+- doesn't count these rows as "already on the iPhone" when looking for duplicates.
 
 ## Which Apple frameworks iSync uses, and why not more
 
@@ -32,7 +55,7 @@ Investigated before writing the sync layer (macOS 26, Xcode 27):
 | --- | --- |
 | **Finder's own engine**: `AMPDevicesAgent` via `AMPDevicesClient` (AMPDevices.framework, XPC service `com.apple.amp.devicesd`). Has `canAcceptFiles:forDevice:`, `copyFiles:toDevice:withReply:`, sync progress and completion callbacks — exactly "drag files onto the iPhone". | **Not usable.** The agent requires the private entitlement `com.apple.amp.devices.client` (Finder has it) and rejects every other client: its log shows `entitlement test failed` and the connection is cancelled. Third-party apps can't hold Apple-private entitlements without disabling system security. |
 | **AirTrafficHost.framework** (`ATHostConnectionCreateWithLibrary`, `…SendSyncRequest`, `…SendMetadataSyncFinished`, `…SendAssetCompleted`, `…ReadMessage`). Loads in-process, no entitlement needed. | **Not usable for Music.** `ATHostConnectionSendSyncRequest(conn, dataclasses, anchors, hostInfo)` always replaces `HostInfo.Grappa` with Apple's per-session request (obfuscated routine inside the framework). iOS verifies the `.cig` signature of every operation file and fails the sync otherwise, and the matching signer is not exported from any library in the shared cache (it lives inside the `AMPDevicesAgent` executable). Using the framework only for framing would bypass its session/Grappa bookkeeping and gain nothing. |
-| **MobileDevice.framework** (also private, also what Finder uses): device discovery, pairing, lockdown sessions, TLS service connections **and Apple's AFC file client** (`AFCConnectionCreate`, `AFCFileRefOpen/Read/Write`, `AFCDirectory*`, `AFCRenamePath`, …). | **Used.** No entitlement needed. Verified read-only against a real iPhone (iOS 27.2) over Wi-Fi. |
+| **MobileDevice.framework** (also private, also what Finder uses): device discovery, pairing, lockdown sessions, TLS service connections **and Apple's AFC file client** (`AFCConnectionCreate`, `AFCFileRefOpen/Read/Write`, `AFCDirectory*`, `AFCRenamePath`, …). | **Used.** No entitlement needed. Verified against a real iPhone (iOS 27.2) over Wi-Fi (reads) and USB (a full sync). |
 
 So iSync implements only what no framework offers: the ATC message exchange (a small framing
 layer over MobileDevice's service connection), the Grappa signature (public calculation built on

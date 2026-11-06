@@ -23,7 +23,7 @@ final class SyncSessionTests: XCTestCase {
     private func snapshot() -> PhoneLibrarySnapshot {
         PhoneLibrarySnapshot(databasePID: -4163065678378989684, primaryContainerPID: 7, mediaAnchor: 41, tracks: [],
                              albumIDs: [.init(album: "Existing Album", artist: "Band"): 555],
-                             artistIDs: ["band": 444], usedSyncIDs: [555, 444], largestArtworkID: 700,
+                             artistIDs: ["band": 444], usedSyncIDs: [555, 444, 123456789, -987654321], largestArtworkID: 700,
                              musicFolders: ["F00", "F01"], tracksWithFiles: [], libraryID: "0123456789ABCDEF")
     }
 
@@ -145,6 +145,45 @@ final class SyncSessionTests: XCTestCase {
         XCTAssertFalse(phone.received.contains { $0.command == "RequestingSync" })
     }
 
+    private func singleInsert() throws -> PlannedInsert {
+        let track = try preparedTrack(name: "a.m4a", codec: .alac, tags: TagSet(), cover: nil)
+        return PlannedInsert(pid: 99999, albumPID: 1, artistPID: 2, artworkCacheID: nil, track: track, fallbackTitle: "a")
+    }
+
+    func testRefusesWhileSongsAwaitTheirAudio() throws {
+        // Live iOS 27.2: answering the phone's audio requests for an unfinished Finder sync's songs
+        // made it delete them, so iSync must not start a session at all.
+        let phone = FakePhone(grappaReply: try grappaReply())
+        var snapshot = snapshot()
+        snapshot.awaitingAudio = [777, 778]
+        let session = SyncSession(fs: phone, atc: ATCConnection(transport: phone), hostName: "Mac", libraryID: "1")
+        XCTAssertThrowsError(try session.run(snapshot: snapshot, inserts: [try singleInsert()])) { error in
+            XCTAssertTrue(error.localizedDescription.contains("2 songs from an earlier sync"), error.localizedDescription)
+        }
+        XCTAssertTrue(phone.received.isEmpty, "nothing may be sent")
+    }
+
+    func testNeverAnswersAudioRequestsForOtherSongs() throws {
+        for foreign in [("31337", 1), ("444", 1), ("555", 3), ("424242", 2)] {
+            let phone = FakePhone(grappaReply: try grappaReply())
+            phone.foreignRequests = [("123456789", 2), foreign]
+            let session = SyncSession(fs: phone, atc: ATCConnection(transport: phone), hostName: "Mac", libraryID: "1")
+            XCTAssertThrowsError(try session.run(snapshot: snapshot(), inserts: [try singleInsert()]), "\(foreign)")
+            XCTAssertTrue(phone.refusals.isEmpty, "no FileError for \(foreign)")
+            XCTAssertTrue(phone.completions.isEmpty, "stops before sending anything for \(foreign)")
+        }
+    }
+
+    func testIdleExitAfterDeliveryEndsTheSession() throws {
+        let phone = FakePhone(grappaReply: try grappaReply())
+        phone.endsWithIdleExit = true
+        let insert = try singleInsert()
+        let session = SyncSession(fs: phone, atc: ATCConnection(transport: phone), hostName: "Mac", libraryID: "1")
+        let outcome = try session.run(snapshot: snapshot(), inserts: [insert])
+        XCTAssertEqual(outcome.delivered, [insert.pid])
+        XCTAssertEqual(phone.refusals, ["123456789": 16, "-987654321": 16])
+    }
+
     func testRefusesToOverwriteAnotherHostsStagedSync() throws {
         let phone = FakePhone(grappaReply: try grappaReply())
         try phone.makeDirectory(SyncSession.stagingDirectory)
@@ -184,9 +223,10 @@ final class PhoneLibraryTests: XCTestCase {
         INSERT INTO album_artist VALUES (1, 'The Band', 9001);
         INSERT INTO album VALUES (1, 'Great Album', 1, 9002);
         INSERT INTO item_artist VALUES (1, 'The Band', 0);
-        INSERT INTO item VALUES (1, 1, 1, 1, 1, 1), (2, 1, 1, 1, 0, 0);
-        INSERT INTO item_extra VALUES (1, 'Don''t Stop', 201000, 'ABCD.m4a'), (2, 'Not In Library', 1000, '');
-        INSERT INTO item_store VALUES (1, 5555), (2, 0);
+        INSERT INTO item VALUES (1, 1, 1, 1, 1, 1), (2, 1, 1, 1, 0, 0), (3, 1, 1, 1, 0, 1), (4, 1, 1, 1, 0, 1);
+        INSERT INTO item_extra VALUES (1, 'Don''t Stop', 201000, 'ABCD.m4a'), (2, 'Not In Library', 1000, ''),
+                                      (3, 'Never Arrived', 1000, ''), (4, 'From iCloud', 2000, '');
+        INSERT INTO item_store VALUES (1, 5555), (2, 0), (3, 7777), (4, 0);
         INSERT INTO container VALUES (1, 4242);
         INSERT INTO artwork_token VALUES ('700'), ('abc'), ('2146701822');
         INSERT INTO artwork VALUES ('701');
@@ -202,14 +242,19 @@ final class PhoneLibraryTests: XCTestCase {
         XCTAssertEqual(snapshot.databasePID, -12345)
         XCTAssertEqual(snapshot.primaryContainerPID, 678)
         XCTAssertEqual(snapshot.mediaAnchor, 17)
-        XCTAssertEqual(snapshot.tracks, [PhoneTrack(title: "Don't Stop", artist: "The Band", album: "Great Album",
-                                                    albumArtist: "The Band", durationMs: 201000, syncID: 5555)])
+        XCTAssertEqual(snapshot.tracks.sorted { $0.title < $1.title }, [
+            PhoneTrack(title: "Don't Stop", artist: "The Band", album: "Great Album", albumArtist: "The Band",
+                       durationMs: 201000, syncID: 5555),
+            PhoneTrack(title: "From iCloud", artist: "The Band", album: "Great Album", albumArtist: "The Band",
+                       durationMs: 2000, syncID: 0),
+        ], "a synced song without its audio doesn't count as on the phone")
         XCTAssertEqual(snapshot.albumIDs[.init(album: "great album", artist: "THE BAND")], 9002)
         XCTAssertEqual(snapshot.artistIDs["the band"], 9001)
         XCTAssertTrue(snapshot.usedSyncIDs.isSuperset(of: [5555, 9001, 9002, 4242, -12345, 678]))
         XCTAssertEqual(snapshot.largestArtworkID, 2146701822)
         XCTAssertEqual(snapshot.musicFolders, ["F07"])
         XCTAssertEqual(snapshot.tracksWithFiles, [5555])
+        XCTAssertEqual(snapshot.awaitingAudio, [7777])
     }
 
     func testParsesLibraryIdentity() {

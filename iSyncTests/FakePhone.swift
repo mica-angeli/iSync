@@ -83,6 +83,8 @@ final class FakePhone: PhoneFileSystem, ServiceTransport {
     private(set) var refusals = [String: Int]()          // AssetID → ErrorCode
     private(set) var stagedOperations: [String: Any]?
     private(set) var signatureValid = false
+    /// End like the iOS 27.2 phone did in a live session: `IdleExit` instead of `SyncFinished`.
+    var endsWithIdleExit = false
     private var outgoing = Data()
     private var expected = Set<String>()
     private var sentFinalPing = false
@@ -164,7 +166,7 @@ final class FakePhone: PhoneFileSystem, ServiceTransport {
             refusals[message.params["AssetID"] as! String] = (message.params["ErrorCode"] as? NSNumber)?.intValue
             finishIfDone()
         case "Pong":
-            reply("SyncFinished", session: 2)
+            reply(endsWithIdleExit ? "IdleExit" : "SyncFinished", session: 2)
         default:
             break
         }
