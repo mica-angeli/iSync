@@ -54,6 +54,9 @@ struct PhoneLibrarySnapshot {
 
 enum PhoneLibrary {
     static let databasePath = "iTunes_Control/iTunes/MediaLibrary.sqlitedb"
+    /// The `base_location` of songs Apple Music has cached while streaming them. Downloads are kept
+    /// in `Music/Downloads` instead.
+    static let streamingCachePath = "Music/Cache"
 
     /// Copies the phone's music database and identity to a temporary folder and reads them.
     static func read(from fs: PhoneFileSystem) throws -> PhoneLibrarySnapshot {
@@ -113,20 +116,21 @@ enum PhoneLibrary {
         let anchorText = try db.first("SELECT value FROM _MLDatabaseProperties WHERE key = 'MLSyncClientSyncAnchor'") { $0.text(0) } ?? nil
         let anchor = anchorText.flatMap { Int($0) } ?? 0
 
-        // Songs that count as "on the phone": stored locally, or in the library from iCloud. Synced
-        // rows still waiting for their audio don't count; see `awaitingAudio`.
-        let itemColumns = try db.columns(of: "item")
-        var conditions = ["i.base_location_id != 0"]
-        if itemColumns.contains("in_my_library") { conditions.append("(i.in_my_library = 1 AND IFNULL(s.sync_id, 0) = 0)") }
+        // Songs that count as "on the phone": those whose audio is stored on it, synced or downloaded.
+        // Songs that are only in the library through Apple Music or iCloud don't count, even when the
+        // streaming cache holds a copy, which the phone may delete at any time. Synced rows still
+        // waiting for their audio don't count either; see `awaitingAudio`.
         let tracks: [PhoneTrack] = try db.all("""
             SELECT e.title, ia.item_artist, al.album, aa.album_artist, e.total_time_ms, s.sync_id
             FROM item i
             JOIN item_extra e ON e.item_pid = i.item_pid
             LEFT JOIN item_store s ON s.item_pid = i.item_pid
+            LEFT JOIN base_location b ON b.base_location_id = i.base_location_id
             LEFT JOIN item_artist ia ON ia.item_artist_pid = i.item_artist_pid
             LEFT JOIN album al ON al.album_pid = i.album_pid
             LEFT JOIN album_artist aa ON aa.album_artist_pid = i.album_artist_pid
-            WHERE \(conditions.joined(separator: " OR "))
+            WHERE i.base_location_id != 0 AND e.location IS NOT NULL AND e.location != ''
+              AND IFNULL(b.path, '') != '\(streamingCachePath)'
             """) { row in
             guard let title = row.text(0), !title.isEmpty else { return nil }
             let duration = row.double(4)

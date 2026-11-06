@@ -209,7 +209,7 @@ final class PhoneLibraryTests: XCTestCase {
         CREATE TABLE _MLDatabaseProperties (key TEXT, value TEXT);
         INSERT INTO _MLDatabaseProperties VALUES ('MLSyncClientSyncAnchor', '17');
         CREATE TABLE item (item_pid INTEGER, item_artist_pid INTEGER, album_pid INTEGER, album_artist_pid INTEGER,
-                           base_location_id INTEGER, in_my_library INTEGER);
+                           base_location_id INTEGER, in_my_library INTEGER, remote_location_id INTEGER);
         CREATE TABLE item_extra (item_pid INTEGER, title TEXT, total_time_ms REAL, location TEXT);
         CREATE TABLE item_store (item_pid INTEGER, sync_id INTEGER);
         CREATE TABLE item_artist (item_artist_pid INTEGER, item_artist TEXT, sync_id INTEGER);
@@ -219,14 +219,18 @@ final class PhoneLibraryTests: XCTestCase {
         CREATE TABLE artwork_token (artwork_token TEXT);
         CREATE TABLE artwork (artwork_token TEXT);
         CREATE TABLE base_location (base_location_id INTEGER, path TEXT);
-        INSERT INTO base_location VALUES (1, 'iTunes_Control/Music/F07'), (2, 'iTunes_Control/Ringtones');
+        INSERT INTO base_location VALUES (1, 'iTunes_Control/Music/F07'), (2, 'iTunes_Control/Ringtones'),
+                                         (200, 'Music/Cache'), (250, 'Music/Downloads');
         INSERT INTO album_artist VALUES (1, 'The Band', 9001);
         INSERT INTO album VALUES (1, 'Great Album', 1, 9002);
         INSERT INTO item_artist VALUES (1, 'The Band', 0);
-        INSERT INTO item VALUES (1, 1, 1, 1, 1, 1), (2, 1, 1, 1, 0, 0), (3, 1, 1, 1, 0, 1), (4, 1, 1, 1, 0, 1);
+        INSERT INTO item VALUES (1, 1, 1, 1, 1, 1, 0), (2, 1, 1, 1, 0, 0, 0), (3, 1, 1, 1, 0, 1, 0),
+                                (4, 1, 1, 1, 0, 1, 100), (5, 1, 1, 1, 200, 1, 100), (6, 1, 1, 1, 250, 1, 100);
         INSERT INTO item_extra VALUES (1, 'Don''t Stop', 201000, 'ABCD.m4a'), (2, 'Not In Library', 1000, ''),
-                                      (3, 'Never Arrived', 1000, ''), (4, 'From iCloud', 2000, '');
-        INSERT INTO item_store VALUES (1, 5555), (2, 0), (3, 7777), (4, 0);
+                                      (3, 'Never Arrived', 1000, ''), (4, 'Apple Music Only', 2000, ''),
+                                      (5, 'Streamed Once', 3000, '5bd8b2a8-eeee-4b70-97b0-c04d8c50d183.m4a'),
+                                      (6, 'Downloaded', 4000, 'f0e1d2c3.m4a');
+        INSERT INTO item_store VALUES (1, 5555), (2, 0), (3, 7777), (4, 0), (5, 0), (6, 0);
         INSERT INTO container VALUES (1, 4242);
         INSERT INTO artwork_token VALUES ('700'), ('abc'), ('2146701822');
         INSERT INTO artwork VALUES ('701');
@@ -245,9 +249,10 @@ final class PhoneLibraryTests: XCTestCase {
         XCTAssertEqual(snapshot.tracks.sorted { $0.title < $1.title }, [
             PhoneTrack(title: "Don't Stop", artist: "The Band", album: "Great Album", albumArtist: "The Band",
                        durationMs: 201000, syncID: 5555),
-            PhoneTrack(title: "From iCloud", artist: "The Band", album: "Great Album", albumArtist: "The Band",
-                       durationMs: 2000, syncID: 0),
-        ], "a synced song without its audio doesn't count as on the phone")
+            PhoneTrack(title: "Downloaded", artist: "The Band", album: "Great Album", albumArtist: "The Band",
+                       durationMs: 4000, syncID: 0),
+        ], "only songs whose audio is stored on the phone count: not Apple Music songs that aren't downloaded "
+            + "(even with a copy in the streaming cache), nor synced songs whose audio never arrived")
         XCTAssertEqual(snapshot.albumIDs[.init(album: "great album", artist: "THE BAND")], 9002)
         XCTAssertEqual(snapshot.artistIDs["the band"], 9001)
         XCTAssertTrue(snapshot.usedSyncIDs.isSuperset(of: [5555, 9001, 9002, 4242, -12345, 678]))

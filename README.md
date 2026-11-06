@@ -54,8 +54,9 @@ The app is not sandboxed (it must talk to `usbmuxd` and run FFmpeg) and is signe
 - **View › Show Log** (⌥⌘L) shows what's happening; the log is also written to
   `~/Library/Logs/iSync/iSync.log`.
 
-A song counts as already on the iPhone when its title, artist and album match a song in the phone's
-library (ignoring case, accents and punctuation) and the durations agree within three seconds.
+A song counts as already on the iPhone when its title, artist and album match a song stored on the
+phone (ignoring case, accents and punctuation) and the durations agree within three seconds. Songs
+that are in your Apple Music or iCloud library but not downloaded don't count, so iSync syncs them.
 
 ## How it works
 
