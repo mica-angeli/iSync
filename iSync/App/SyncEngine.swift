@@ -297,7 +297,10 @@ final class SyncEngine {
     private func run() async {
         isRunning = true
         cancelFlag.set(false)
+        // Keep the Mac awake while reading, converting and syncing; the display may still turn off.
+        let keepAwake = SleepAssertion(reason: "iSync is converting and syncing music to an iPhone")
         defer {
+            keepAwake.release()
             isRunning = false
             activity = nil
             phoneProgress = nil
