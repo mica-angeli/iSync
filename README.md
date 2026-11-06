@@ -51,6 +51,9 @@ The app is not sandboxed (it must talk to `usbmuxd` and run FFmpeg) and is signe
   *Converting…*, *Copying…*, *Synced*, or why it couldn't be synced.
 - Songs dropped before an iPhone is connected wait and sync as soon as one appears.
 - **Stop** cancels; **Retry Failed** tries failed songs again; **Clear Finished** tidies the list.
+- To remove songs, select them (⌘-click and ⇧-click select several) and press Delete, or right-click ›
+  **Remove from List**. A song that isn't synced yet won't be: its conversion stops and its converted
+  file is deleted. A song that is being copied to the iPhone can't be removed.
 - **View › Show Log** (⌥⌘L) shows what's happening; the log is also written to
   `~/Library/Logs/iSync/iSync.log`.
 

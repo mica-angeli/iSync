@@ -149,18 +149,32 @@ private struct DropZone: View {
 
 private struct TrackList: View {
     let engine: SyncEngine
+    @State private var selection = Set<TrackItem.ID>()
 
     var body: some View {
-        List {
+        List(selection: $selection) {
             ForEach(engine.items) { item in
                 TrackRow(item: item)
-                    .contextMenu {
-                        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
-                        Button("Remove from List") { engine.remove(item) }
-                    }
             }
         }
         .listStyle(.inset(alternatesRowBackgrounds: true))
+        // Right-clicking a selected row acts on the whole selection, any other row on just that row.
+        .contextMenu(forSelectionType: TrackItem.ID.self) { ids in
+            if !ids.isEmpty {
+                Button("Show in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting(engine.items.filter { ids.contains($0.id) }.map(\.url))
+                }
+                Button("Remove from List") { remove(ids) }
+                    .disabled(!engine.items.contains { ids.contains($0.id) && $0.canRemove })
+            }
+        }
+        .onDeleteCommand { remove(selection) }
+    }
+
+    private func remove(_ ids: Set<TrackItem.ID>) {
+        if engine.remove(ids) == 0 { NSSound.beep() }
+        // Songs being copied can't be removed and stay selected.
+        selection.formIntersection(engine.items.map(\.id))
     }
 }
 

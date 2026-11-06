@@ -39,6 +39,8 @@ final class TrackItem: Identifiable {
     @ObservationIgnored var plan: ConversionPlan?
     @ObservationIgnored var prepared: PreparedTrack?
     @ObservationIgnored var pid: Int64?
+    /// Set when the song is taken off the list. Thread-safe, because a running conversion checks it.
+    @ObservationIgnored let removal = CancelFlag()
 
     init(url: URL) {
         self.url = url
@@ -46,6 +48,12 @@ final class TrackItem: Identifiable {
     }
 
     var durationMs: Int? { probe?.bestDuration.map { Int($0 * 1000) } }
+
+    var isRemoved: Bool { removal.isCancelled }
+
+    /// A song being copied can't be taken back: the phone already lists it, and it deletes a song whose
+    /// audio doesn't arrive.
+    var canRemove: Bool { status != .syncing }
 
     func discardConvertedFile() {
         if let prepared, prepared.isTemporary {
@@ -89,11 +97,12 @@ final class SyncEngine {
     @ObservationIgnored private var needsAnotherPass = false
     @ObservationIgnored let workDirectory: URL
 
-    init() {
+    /// `workDirectory` holds converted files; it is emptied now and when the app quits.
+    init(workDirectory: URL? = nil) {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        workDirectory = caches.appendingPathComponent("app.isync.iSync/Converted", isDirectory: true)
-        try? FileManager.default.removeItem(at: workDirectory)
-        try? FileManager.default.createDirectory(at: workDirectory, withIntermediateDirectories: true)
+        self.workDirectory = workDirectory ?? caches.appendingPathComponent("app.isync.iSync/Converted", isDirectory: true)
+        try? FileManager.default.removeItem(at: self.workDirectory)
+        try? FileManager.default.createDirectory(at: self.workDirectory, withIntermediateDirectories: true)
     }
 
     // MARK: Devices
@@ -247,10 +256,20 @@ final class SyncEngine {
         kick()
     }
 
-    func remove(_ item: TrackItem) {
-        guard !isRunning || item.status.isFinished || item.status == .queued || item.status == .waitingForDevice else { return }
-        item.discardConvertedFile()
-        items.removeAll { $0 === item }
+    /// Takes songs off the list. A song that isn't synced yet won't be: its conversion stops if it is
+    /// running, and its converted file is deleted. Songs being copied to the iPhone stay (`canRemove`).
+    /// Returns how many songs were removed.
+    @discardableResult
+    func remove(_ ids: Set<TrackItem.ID>) -> Int {
+        let removed = items.filter { ids.contains($0.id) && $0.canRemove }
+        guard !removed.isEmpty else { return 0 }
+        for item in removed {
+            item.removal.set(true)
+            item.discardConvertedFile()
+        }
+        items.removeAll { $0.isRemoved }
+        logInfo("Removed \(removed.count) song(s) from the list")
+        return removed.count
     }
 
     func cleanUp() {
@@ -353,6 +372,7 @@ final class SyncEngine {
         activity = "Reading \(queued.count) file(s)…"
         let cancel = cancelFlag
         try await forEachConcurrently(queued, limit: 6, isCancelled: { cancel.isCancelled }) { item in
+            guard !item.isRemoved else { return }
             item.status = .analyzing
             let url = item.url
             do {
@@ -443,22 +463,32 @@ final class SyncEngine {
         }
     }
 
-    /// Converts one song. Returns whether it is ready to sync; throws only when told to stop.
-    private func convert(_ item: TrackItem, tools: FFTools, isCancelled: @escaping @Sendable () -> Bool) async throws -> Bool {
-        guard let probe = item.probe, let plan = item.plan else { return false }
+    /// Converts one song. Returns whether it is ready to sync; throws only when told to stop. Removing
+    /// the song from the list stops its conversion and discards the result.
+    func convert(_ item: TrackItem, tools: FFTools, isCancelled: @escaping @Sendable () -> Bool) async throws -> Bool {
+        guard !item.isRemoved, let probe = item.probe, let plan = item.plan else { return false }
         let url = item.url
         let work = workDirectory
+        let removal = item.removal
         do {
             let prepared = try await offMain {
                 try Converter.prepare(source: url, probe: probe, plan: plan, tools: tools, workDirectory: work,
-                                      isCancelled: isCancelled)
+                                      isCancelled: { isCancelled() || removal.isCancelled })
             }
             item.prepared = prepared
+            if item.isRemoved {
+                item.discardConvertedFile()
+                return false
+            }
             item.formatDescription = Self.describe(probe: probe, plan: plan) + " · " + prepared.format.summary
             item.status = .readyToSync
             return true
         } catch {
             if isCancelled() { throw error }
+            if item.isRemoved {
+                logInfo("Stopped converting \(url.lastPathComponent): removed from the list")
+                return false
+            }
             item.status = .failed(error.localizedDescription)
             logError("\(url.lastPathComponent): \(error.localizedDescription)")
             return false
@@ -474,7 +504,7 @@ final class SyncEngine {
         var inserts = [PlannedInsert]()
         var itemsByPID = [Int64: TrackItem]()
         for item in batch {
-            guard let prepared = item.prepared else { continue }
+            guard !item.isRemoved, let prepared = item.prepared else { continue }
             let names = OperationFile.Names(tags: prepared.tags, fallbackTitle: item.url.deletingPathExtension().lastPathComponent)
             let groups = allocator.groupIDs(album: names.album, effectiveArtist: names.effectiveAlbumArtist)
             let insert = PlannedInsert(pid: allocator.newPID(), albumPID: groups.album, artistPID: groups.artist,
