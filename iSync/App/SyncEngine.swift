@@ -55,14 +55,6 @@ final class TrackItem: Identifiable {
     }
 }
 
-/// Thread-safe cancellation flag shared with background work.
-final class CancelFlag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = false
-    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return value }
-    func set(_ newValue: Bool) { lock.lock(); value = newValue; lock.unlock() }
-}
-
 /// Orchestrates everything: watching for iPhones, analysing dropped files, skipping songs the phone
 /// already has, converting the rest and syncing them.
 @MainActor
@@ -356,7 +348,8 @@ final class SyncEngine {
         let queued = items.filter { $0.status == .queued }
         guard !queued.isEmpty else { return }
         activity = "Reading \(queued.count) file(s)…"
-        try await forEachConcurrently(queued, limit: 6) { item in
+        let cancel = cancelFlag
+        try await forEachConcurrently(queued, limit: 6, isCancelled: { cancel.isCancelled }) { item in
             item.status = .analyzing
             let url = item.url
             do {
@@ -419,108 +412,129 @@ final class SyncEngine {
             }
         }
 
-        // Convert.
-        let toConvert = items.filter { $0.status == .converting }
-        if !toConvert.isEmpty {
-            activity = "Converting \(toConvert.count) song(s)…"
-            let limit = max(2, min(4, ProcessInfo.processInfo.activeProcessorCount / 2))
-            let work = workDirectory
-            let cancel = cancelFlag
-            try await forEachConcurrently(toConvert, limit: limit) { item in
-                guard let probe = item.probe, let plan = item.plan else { return }
-                let url = item.url
-                do {
-                    item.prepared = try await offMain {
-                        try Converter.prepare(source: url, probe: probe, plan: plan, tools: tools, workDirectory: work,
-                                              isCancelled: { cancel.isCancelled })
-                    }
-                    if let prepared = item.prepared {
-                        item.formatDescription = Self.describe(probe: probe, plan: plan) + " · " + prepared.format.summary
-                    }
-                    item.status = .readyToSync
-                } catch {
-                    if cancel.isCancelled { throw error }
-                    item.status = .failed(error.localizedDescription)
-                    logError("\(url.lastPathComponent): \(error.localizedDescription)")
-                }
-            }
-        }
-
-        // Sync in batches; re-read the library after each to confirm what landed.
+        // Convert, and sync each batch as soon as it is converted while the rest keep converting.
+        // Songs converted by an earlier, stopped run go first.
         let ready = items.filter { $0.status == .readyToSync }
-        guard !ready.isEmpty else { return }
+        let toConvert = items.filter { $0.status == .converting }
+        guard !ready.isEmpty || !toConvert.isEmpty else { return }
+        if !toConvert.isEmpty { activity = "Converting \(toConvert.count) song(s)…" }
+        let limit = max(2, min(4, ProcessInfo.processInfo.activeProcessorCount / 2))
         let libraryID = snapshot.libraryID ?? Self.fallbackLibraryID(for: device.udid)
         let hostName = (SCDynamicStoreCopyComputerName(nil, nil) as String?) ?? "Mac"
-        for start in stride(from: 0, to: ready.count, by: Self.batchSize) {
-            if cancelFlag.isCancelled { throw ISyncError("Cancelled.") }
-            let batch = Array(ready[start..<min(start + Self.batchSize, ready.count)])
-            var allocator = IdentityAllocator(snapshot: snapshot)
-            var inserts = [PlannedInsert]()
-            var itemsByPID = [Int64: TrackItem]()
-            for item in batch {
-                guard let prepared = item.prepared else { continue }
-                let names = OperationFile.Names(tags: prepared.tags, fallbackTitle: item.url.deletingPathExtension().lastPathComponent)
-                let groups = allocator.groupIDs(album: names.album, effectiveArtist: names.effectiveAlbumArtist)
-                let insert = PlannedInsert(pid: allocator.newPID(), albumPID: groups.album, artistPID: groups.artist,
-                                           artworkCacheID: prepared.phoneCover == nil ? nil : allocator.artwork(),
-                                           track: prepared, fallbackTitle: item.url.lastPathComponent)
-                item.pid = insert.pid
-                item.status = .syncing
-                item.uploadProgress = 0
-                inserts.append(insert)
-                itemsByPID[insert.pid] = item
-            }
-            guard !inserts.isEmpty else { continue }
-            logInfo("Syncing batch of \(inserts.count) song(s)")
-            activity = "Starting sync…"
-            phoneProgress = nil
-
-            let cancel = cancelFlag
-            let events: (SyncSession.Event) -> Void = { event in
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self.handle(event, items: itemsByPID) }
-                }
-            }
-            let currentSnapshot = snapshot
-            let outcome: SyncSession.Outcome
-            do {
-                outcome = try await offMain {
-                    let heartbeat = device.interface == .network ? try HeartbeatKeeper(device: device) : nil
-                    defer { heartbeat?.stop() }
-                    let fs = try device.openFileSystem()
-                    defer { fs.close() }
-                    let atc = ATCConnection(transport: try device.startService("com.apple.atc"))
-                    defer { atc.close() }
-                    let session = SyncSession(fs: fs, atc: atc, hostName: hostName, libraryID: libraryID,
-                                              onEvent: events, isCancelled: { cancel.isCancelled })
-                    return try session.run(snapshot: currentSnapshot, inserts: inserts)
-                }
-            } catch {
-                for item in itemsByPID.values { item.uploadProgress = nil }
-                throw error
-            }
-
-            activity = "Confirming with the iPhone…"
-            snapshot = try await readLibrary(device)
-            var unconfirmed = outcome.delivered.filter { !snapshot.tracksWithFiles.contains($0) }
-            if !unconfirmed.isEmpty {
-                try await Task.sleep(nanoseconds: 3_000_000_000)
-                snapshot = try await readLibrary(device)
-                unconfirmed = unconfirmed.filter { !snapshot.tracksWithFiles.contains($0) }
-            }
-            for (pid, item) in itemsByPID {
-                item.uploadProgress = nil
-                if outcome.delivered.contains(pid) && !unconfirmed.contains(pid) {
-                    item.status = .synced
-                    item.discardConvertedFile()
-                } else if outcome.delivered.contains(pid) {
-                    item.status = .failed("Sent, but the iPhone didn't list it afterwards.")
-                } else {
-                    item.status = .failed(outcome.failed[pid] ?? "Not delivered.")
-                }
-            }
-            logInfo("Batch done: \(itemsByPID.values.filter { $0.status == .synced }.count) of \(itemsByPID.count) confirmed on the iPhone")
+        let cancel = cancelFlag
+        do {
+            try await prepareAndDeliver(
+                ready: ready, pending: toConvert, limit: limit, batchSize: Self.batchSize,
+                isCancelled: { cancel.isCancelled },
+                prepare: { item, shouldStop in try await self.convert(item, tools: tools, isCancelled: shouldStop) },
+                deliver: { batch in
+                    snapshot = try await self.syncBatch(batch, device: device, snapshot: snapshot,
+                                                        libraryID: libraryID, hostName: hostName)
+                    let converting = self.items.filter { $0.status == .converting }.count
+                    if converting > 0 { self.activity = "Converting \(converting) song(s)…" }
+                })
+        } catch {
+            // Songs not converted yet wait for the next sync rather than failing with the phone's error.
+            for item in items where item.status == .converting { item.status = .waitingForDevice }
+            throw error
         }
+    }
+
+    /// Converts one song. Returns whether it is ready to sync; throws only when told to stop.
+    private func convert(_ item: TrackItem, tools: FFTools, isCancelled: @escaping @Sendable () -> Bool) async throws -> Bool {
+        guard let probe = item.probe, let plan = item.plan else { return false }
+        let url = item.url
+        let work = workDirectory
+        do {
+            let prepared = try await offMain {
+                try Converter.prepare(source: url, probe: probe, plan: plan, tools: tools, workDirectory: work,
+                                      isCancelled: isCancelled)
+            }
+            item.prepared = prepared
+            item.formatDescription = Self.describe(probe: probe, plan: plan) + " · " + prepared.format.summary
+            item.status = .readyToSync
+            return true
+        } catch {
+            if isCancelled() { throw error }
+            item.status = .failed(error.localizedDescription)
+            logError("\(url.lastPathComponent): \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Syncs one batch, then re-reads the library to confirm what landed. Returns the new snapshot.
+    private func syncBatch(_ batch: [TrackItem], device: AppleDevice, snapshot: PhoneLibrarySnapshot,
+                           libraryID: String, hostName: String) async throws -> PhoneLibrarySnapshot {
+        if cancelFlag.isCancelled { throw ISyncError("Cancelled.") }
+        var snapshot = snapshot
+        var allocator = IdentityAllocator(snapshot: snapshot)
+        var inserts = [PlannedInsert]()
+        var itemsByPID = [Int64: TrackItem]()
+        for item in batch {
+            guard let prepared = item.prepared else { continue }
+            let names = OperationFile.Names(tags: prepared.tags, fallbackTitle: item.url.deletingPathExtension().lastPathComponent)
+            let groups = allocator.groupIDs(album: names.album, effectiveArtist: names.effectiveAlbumArtist)
+            let insert = PlannedInsert(pid: allocator.newPID(), albumPID: groups.album, artistPID: groups.artist,
+                                       artworkCacheID: prepared.phoneCover == nil ? nil : allocator.artwork(),
+                                       track: prepared, fallbackTitle: item.url.lastPathComponent)
+            item.pid = insert.pid
+            item.status = .syncing
+            item.uploadProgress = 0
+            inserts.append(insert)
+            itemsByPID[insert.pid] = item
+        }
+        guard !inserts.isEmpty else { return snapshot }
+        let converting = items.filter { $0.status == .converting }.count
+        logInfo("Syncing batch of \(inserts.count) song(s)" + (converting > 0 ? " while \(converting) more convert" : ""))
+        activity = "Starting sync…"
+        phoneProgress = nil
+
+        let cancel = cancelFlag
+        let events: (SyncSession.Event) -> Void = { event in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self.handle(event, items: itemsByPID) }
+            }
+        }
+        let currentSnapshot = snapshot
+        let outcome: SyncSession.Outcome
+        do {
+            outcome = try await offMain {
+                let heartbeat = device.interface == .network ? try HeartbeatKeeper(device: device) : nil
+                defer { heartbeat?.stop() }
+                let fs = try device.openFileSystem()
+                defer { fs.close() }
+                let atc = ATCConnection(transport: try device.startService("com.apple.atc"))
+                defer { atc.close() }
+                let session = SyncSession(fs: fs, atc: atc, hostName: hostName, libraryID: libraryID,
+                                          onEvent: events, isCancelled: { cancel.isCancelled })
+                return try session.run(snapshot: currentSnapshot, inserts: inserts)
+            }
+        } catch {
+            for item in itemsByPID.values { item.uploadProgress = nil }
+            throw error
+        }
+
+        activity = "Confirming with the iPhone…"
+        snapshot = try await readLibrary(device)
+        var unconfirmed = outcome.delivered.filter { !snapshot.tracksWithFiles.contains($0) }
+        if !unconfirmed.isEmpty {
+            try await Task.sleep(nanoseconds: 3_000_000_000)
+            snapshot = try await readLibrary(device)
+            unconfirmed = unconfirmed.filter { !snapshot.tracksWithFiles.contains($0) }
+        }
+        for (pid, item) in itemsByPID {
+            item.uploadProgress = nil
+            if outcome.delivered.contains(pid) && !unconfirmed.contains(pid) {
+                item.status = .synced
+                item.discardConvertedFile()
+            } else if outcome.delivered.contains(pid) {
+                item.status = .failed("Sent, but the iPhone didn't list it afterwards.")
+            } else {
+                item.status = .failed(outcome.failed[pid] ?? "Not delivered.")
+            }
+        }
+        logInfo("Batch done: \(itemsByPID.values.filter { $0.status == .synced }.count) of \(itemsByPID.count) confirmed on the iPhone")
+        return snapshot
     }
 
     private func handle(_ event: SyncSession.Event, items byPID: [Int64: TrackItem]) {
@@ -543,24 +557,5 @@ final class SyncEngine {
         let id = String(format: "%016llX", UInt64.random(in: 1...UInt64.max))
         UserDefaults.standard.set(id, forKey: key)
         return id
-    }
-
-    /// Runs `body` for each element with at most `limit` running at once.
-    private func forEachConcurrently(_ elements: [TrackItem], limit: Int,
-                                     _ body: @escaping @MainActor (TrackItem) async throws -> Void) async throws {
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            var iterator = elements.makeIterator()
-            var running = 0
-            while running < limit, let next = iterator.next() {
-                group.addTask { try await body(next) }
-                running += 1
-            }
-            while try await group.next() != nil {
-                if cancelFlag.isCancelled { group.cancelAll(); throw ISyncError("Cancelled.") }
-                if let next = iterator.next() {
-                    group.addTask { try await body(next) }
-                }
-            }
-        }
     }
 }

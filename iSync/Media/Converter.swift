@@ -233,7 +233,14 @@ enum Converter {
             }
             arguments += ["-f", "ipod", output.path]
             logInfo("ffmpeg \(arguments.joined(separator: " "))")
-            let result = try ProcessRunner.run(tools.ffmpeg, arguments, timeout: 3600, isCancelled: isCancelled)
+            let result: ProcessRunner.Output
+            do {
+                result = try ProcessRunner.run(tools.ffmpeg, arguments, timeout: 3600, isCancelled: isCancelled)
+            } catch {
+                // Stopped or timed out part-way: don't leave the half-written file behind.
+                try? FileManager.default.removeItem(at: output)
+                throw error
+            }
             guard result.status == 0 else {
                 try? FileManager.default.removeItem(at: output)
                 let reason = result.stderrString.split(separator: "\n").suffix(2).joined(separator: " ")
