@@ -78,6 +78,16 @@ third-party app.
   guessing when the phone answers unexpectedly.
 - Songs are matched by tags, not audio fingerprints, so a differently tagged copy of a song counts as
   a new song.
+- MP3 and AAC files are registered without gapless-playback timing (the phone accepts this), so a
+  gapless album in those formats may show tiny gaps between tracks. ALAC is unaffected.
+
+## Status
+
+Verified against a real iPhone (iOS 27.2): device discovery, lockdown sessions, Apple's AFC client
+(listing, stat, reads, a 28 MB library database copy) and reading a 16,000-song library. Conversion,
+tagging and the complete sync session are covered by automated tests, including a simulated iPhone
+that checks every protocol message, the signed operation file and the uploads. A full sync session
+(the phone actually importing a song) has not yet been run against real hardware.
 
 ## Project layout
 
