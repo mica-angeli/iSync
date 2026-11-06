@@ -139,7 +139,7 @@ enum ConversionPlan: Equatable {
         if isLossless(audio.codec) {
             let validALACDepth = [16, 20, 24, 32].contains(audio.bitsPerSample)
             if audio.codec == "alac", probe.isMP4Family, stereoOrMono, validALACDepth {
-                return ["m4a", "mp4", "m4b"].contains(ext) ? .copy : .remux
+                return ["m4a", "mp4", "m4b"].contains(ext) && !probe.hasVideo ? .copy : .remux
             }
             let isDSD = audio.codec.hasPrefix("dsd_")
             let isFloat = ["flt", "fltp", "dbl", "dblp"].contains(audio.sampleFormat ?? "")
@@ -156,14 +156,14 @@ enum ConversionPlan: Equatable {
         switch audio.codec {
         case "mp3":
             let bitRate = audio.bitRate ?? probe.formatBitRate ?? 0
-            if probe.formatName == "mp3", ext == "mp3", stereoOrMono, audio.sampleRate <= 48000, bitRate <= 320_000 {
+            if probe.formatName == "mp3", ext == "mp3", !probe.hasVideo, stereoOrMono, audio.sampleRate <= 48000, bitRate <= 320_000 {
                 return .copy
             }
         case "aac":
             let profile = audio.profile?.lowercased() ?? "lc"
             let supported = ["lc", "he-aac", "he-aacv2"].contains(profile)
             if supported, stereoOrMono, audio.sampleRate <= 96000 {
-                if probe.isMP4Family, ["m4a", "mp4", "m4b"].contains(ext) {
+                if probe.isMP4Family, ["m4a", "mp4", "m4b"].contains(ext), !probe.hasVideo {
                     return .copy
                 }
                 return .remux

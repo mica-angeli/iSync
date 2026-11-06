@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SystemConfiguration
 
 /// One dropped file and its progress through the pipeline.
 @MainActor
@@ -264,6 +265,17 @@ final class SyncEngine {
         try? FileManager.default.removeItem(at: workDirectory)
     }
 
+    /// Songs that are waiting while nothing is running (e.g. after the phone could not be read).
+    var canSyncNow: Bool {
+        !isRunning && activeDeviceInfo != nil
+            && items.contains { $0.status == .waitingForDevice || $0.status == .readyToSync || $0.status == .queued }
+    }
+
+    func syncNow() {
+        banner = nil
+        kick()
+    }
+
     var hasFailures: Bool { items.contains { if case .failed = $0.status { return true } else { return false } } }
 
     var counts: (synced: Int, already: Int, failed: Int, pending: Int) {
@@ -434,7 +446,7 @@ final class SyncEngine {
         let ready = items.filter { $0.status == .readyToSync }
         guard !ready.isEmpty else { return }
         let libraryID = snapshot.libraryID ?? Self.fallbackLibraryID(for: device.udid)
-        let hostName = Host.current().localizedName ?? "Mac"
+        let hostName = (SCDynamicStoreCopyComputerName(nil, nil) as String?) ?? "Mac"
         for start in stride(from: 0, to: ready.count, by: Self.batchSize) {
             if cancelFlag.isCancelled { throw ISyncError("Cancelled.") }
             let batch = Array(ready[start..<min(start + Self.batchSize, ready.count)])

@@ -163,7 +163,9 @@ final class MobileDeviceAFC: PhoneFileSystem {
 
     func makeDirectory(_ path: String) throws {
         let code = path.withCString { api.directoryCreate(connection, $0) }
-        if code == Self.objectExists { return }
+        if code == 0 || code == Self.objectExists { return }
+        // Whatever the code, an existing directory is what the caller wanted.
+        if (try? isDirectory(path)) == true { return }
         try check(code, "creating \(path)")
     }
 

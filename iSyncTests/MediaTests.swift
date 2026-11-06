@@ -223,3 +223,17 @@ final class ConverterTests: XCTestCase {
         XCTAssertEqual(out.tags.artist, "Someone")
     }
 }
+
+final class VideoPlanTests: XCTestCase {
+    func testMovieFilesAreNeverSentAsIs() throws {
+        var probe = ProbeResult(formatName: "mov,mp4,m4a,3gp,3g2,mj2", duration: 3, formatBitRate: 256_000,
+                                audio: .init(index: 1, codec: "aac", profile: "LC", sampleRate: 44100, channels: 2,
+                                             sampleFormat: "fltp", bitsPerSample: 0, bitRate: 256_000, duration: 3,
+                                             durationTS: nil, timeBase: nil, codecTag: nil),
+                                pictures: [], rawTags: [])
+        let url = URL(fileURLWithPath: "/x/clip.mp4")
+        XCTAssertEqual(try ConversionPlan.plan(for: probe, source: url), .copy)
+        probe.hasVideo = true
+        XCTAssertEqual(try ConversionPlan.plan(for: probe, source: url), .remux)
+    }
+}

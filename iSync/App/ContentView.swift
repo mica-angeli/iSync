@@ -270,6 +270,10 @@ private struct FooterBar: View {
             if engine.isRunning {
                 Button("Stop") { engine.cancel() }
             } else {
+                if engine.canSyncNow {
+                    Button("Sync Now") { engine.syncNow() }
+                        .keyboardShortcut(.defaultAction)
+                }
                 if engine.hasFailures {
                     Button("Retry Failed") { engine.retryFailed() }
                 }

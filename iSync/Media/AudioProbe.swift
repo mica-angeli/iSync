@@ -28,6 +28,8 @@ struct ProbeResult {
     }
 
     var formatName: String
+    /// The file has real video (not just cover art), so it must not be sent as is.
+    var hasVideo = false
     var duration: Double?
     var formatBitRate: Int?
     var audio: Audio
@@ -127,8 +129,10 @@ struct ProbeResult {
             )
         }
 
+        let hasVideo = streams.contains { $0["codec_type"] as? String == "video" && !isAttachedPicture($0) }
         return ProbeResult(
             formatName: format["format_name"] as? String ?? "",
+            hasVideo: hasVideo,
             duration: double(format["duration"]),
             formatBitRate: int(format["bit_rate"]),
             audio: audio,
