@@ -191,6 +191,14 @@ final class AppleDevice: @unchecked Sendable, Identifiable {
         }
     }
 
+    /// Opens the phone's media file system through Apple's AFC client.
+    func openFileSystem(allowPairing: Bool = true) throws -> PhoneFileSystem {
+        guard let service = try startService("com.apple.afc", allowPairing: allowPairing) as? MobileDeviceConnection else {
+            throw ISyncError("Could not open the iPhone's file service.")
+        }
+        return try MobileDeviceAFC(service: service)
+    }
+
     /// Starts a lockdown service and returns its (possibly TLS-wrapped) connection.
     func startService(_ name: String, allowPairing: Bool = true) throws -> ServiceTransport {
         try withLockdownSession(allowPairing: allowPairing) {

@@ -38,6 +38,14 @@ final class MobileDeviceConnection: ServiceTransport, @unchecked Sendable {
         Unmanaged<AnyObject>.fromOpaque(UnsafeRawPointer(connection)).release()
     }
 
+    /// The underlying socket (used to layer Apple's AFC client on top of this connection).
+    var socket: Int32 { md.connectionGetSocket(connection) }
+
+    /// The TLS context, when the service is TLS-wrapped.
+    func secureIOContext(_ getter: (@convention(c) (OpaquePointer) -> UnsafeMutableRawPointer?)?) -> UnsafeMutableRawPointer? {
+        getter?(connection)
+    }
+
     private var isInvalidated: Bool {
         stateLock.lock(); defer { stateLock.unlock() }
         return invalidated
